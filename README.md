@@ -1,6 +1,6 @@
 # Anti-Social
 
-A locked-down browser for Facebook and Instagram. It loads only the parts you need and refuses everything else before it loads, so there is nothing to scroll.
+A locked-down browser for Facebook and Instagram, made for creating instead of consuming. Messages, Marketplace, alerts, groups, your own posts, and posting all work. Feeds do not load at all, and nothing ever moves on to the next post by itself, so there is nothing to scroll.
 
 Five tabs:
 
@@ -8,15 +8,38 @@ Five tabs:
 |---|---|
 | Messages | facebook.com/messages (Messenger inbox and conversations) |
 | Marketplace | facebook.com/marketplace (browse, search, your listings, buyer chats) |
-| Alerts | facebook.com/notifications (comments, mentions, tags, and the posts they point to) |
+| Alerts | Three pages, picked with the switch at the top. **Alerts** is facebook.com/notifications. **My Posts** is your own Facebook profile. **Groups** is the list of groups you are in. |
 | IG Inbox | instagram.com/direct/inbox (Instagram DMs) |
-| IG Alerts | instagram.com/notifications (comments and mentions on your posts) |
+| IG Alerts | Two pages again. **Alerts** is instagram.com/notifications. **My Posts** is your own Instagram grid. |
 
 Tap the tab you are already on to jump back to its home page.
 
+## Your posts, and posts you tap
+
+Your own posts, Reels, videos, photos, and stories always open. That is how you read and answer comments: tap a comment alert, or open the post from My Posts, and reply right on the post.
+
+With **Open other people's posts I tap** on (the default), a post by someone else opens too, as long as you tapped it. What never happens is the next one. Swiping to the next Reel, a story moving on to the next person, or autoplay into another video is blocked, and you stay on the post you opened. Turn the switch off and only your own posts open.
+
+What counts as a tap:
+
+- A link you tap opens the post it points to.
+- A tap that does not point at a post (a shared-post card in a chat, a share link that redirects) opens the first post it leads to, but only when you start from a page that is not a post, like a chat or your alerts. From inside a post, only a link to another post counts. So the player can never move you on.
+
+How the app knows a post is yours:
+
+1. The link names you. `facebook.com/<you>/videos/<id>`, `instagram.com/<you>/reel/<code>`, `permalink.php?...&id=<your number>`, and so on. Your username comes from facebook.com/me and from Instagram's own nav. Your account number comes from each site's login cookie.
+2. The app has seen it before. Every post on your own Reels grid (Facebook) or your grid (Instagram) is remembered as yours, along with every post it has checked.
+3. Anything else is looked up once. Bare links like `facebook.com/reel/<id>` or `instagram.com/p/<code>` do not say who made them, so the app fetches that post's page and reads the owner from its header (`og:url` and the canonical link, which carry the owner's username). It tries as a visitor first, then as you, for posts only your friends can see. The page stays covered while this happens, so someone else's post never shows.
+
+The rules are in `Policy/AccessPolicy.swift` (which links are posts, and who they name), `Policy/OwnershipParser.swift` (reading the owner off a page), and `Web/OwnershipChecker.swift` (the memory and the lookups).
+
+## Groups
+
+The **Groups** page lists the groups you are in. Each group opens in full: its posts, comments, members, and the box to write a post. Posts inside a group always open. The mixed Groups feed (posts from all your groups at once) and group suggestions stay blocked.
+
 ## What is blocked
 
-Home feed, Reels, Watch, Video, Stories, Friends, Groups feed, Gaming, Events, Memories, Saved, Search, Explore, hashtags, and every profile except your own. Links to install or open the real apps are blocked too. Video never autoplays.
+The home feed, the Reels feed, Watch, the Stories feed, Friends, the Groups feed and suggestions, Gaming, Events, Memories, Saved, Search, Explore, hashtags, every profile except your own, and any post by someone else that you did not tap. Links to install or open the real apps are blocked too. Video never autoplays.
 
 Blocking happens in two places:
 
@@ -27,9 +50,7 @@ On top of that, feed links, Reels tabs, and "open the app" nags are hidden insid
 
 ## What is allowed
 
-Messages, Marketplace, notifications, login and security pages, settings, your professional dashboard, single posts (`/username/posts/...`, `/permalink.php`, `/story.php`, `/photo...`, single videos), single group posts (can be turned off), and your own profile once you enter your username in Settings. On Instagram: DMs, notifications, single posts (`/p/...`), and your own profile.
-
-Single Reels are off by default because a Reel page can swipe into the next one. Turn it on in Settings if you need to answer comments on your Reels.
+Messages, Marketplace, notifications, groups, login and security pages, settings, your professional dashboard, your own profile (including your Reels and Videos tabs), your story archive, and your own posts, Reels, videos, photos, and stories. On Instagram: DMs, notifications, your own grid, and your own posts, Reels, stories, and highlights. Posting is allowed everywhere: a post, a story, Go Live, a Marketplace listing, and an Instagram post or story. Anything you tap opens as well (see above).
 
 ## Install on your iPhone
 
@@ -46,12 +67,12 @@ With the paid developer account the install stays valid for a year.
 
 1. Delete the Facebook, Messenger, and Instagram apps from the phone. Links inside the web pages can open installed apps, and there is no reason to keep the doors open.
 2. Log in to Facebook in the Messages tab. Log in to Instagram in the IG Inbox tab. Logins persist across all tabs and relaunches.
-3. Open Settings (the circle menu, top right) and enter your Facebook and Instagram usernames so you can open your own profile.
+3. Open the Alerts tab, switch to **My Posts** once, and do the same in IG Alerts. That is how the app learns your usernames. You can also type them in Settings (the circle menu, top right).
 4. Facebook uses the desktop site by default, because Facebook's mobile site refuses to show Messenger and bounces to the feed. If the text is too small, pick a narrower **Desktop page width** in Settings, or pinch to zoom. Rotating the phone sideways also helps.
 
 ## When something slips through
 
-Open the circle menu, pick **Diagnostics**, tap **Capture page map**, then **Share page map**. Send that over together with what you saw and the rule can be tightened. The Diagnostics screen also keeps a log of everything that was blocked, in case something you needed got caught.
+Open the circle menu, pick **Diagnostics**, tap **Capture page map**, then **Share page map**. Send that over together with what you saw and the rule can be tightened. The Diagnostics screen also keeps a log of everything that was blocked, in case something you needed got caught, and shows which accounts the app thinks are yours and how many of your posts it knows.
 
 ## Files
 
@@ -59,11 +80,13 @@ Open the circle menu, pick **Diagnostics**, tap **Capture page map**, then **Sha
 AntiSocial/
   AntiSocialApp.swift        App entry. Builds settings and the web view pool.
   ContentView.swift          Tab bar, per-tab top bar, error card.
-  Models/WebTab.swift        The five tabs and their home URLs.
+  Models/WebTab.swift        The pages, their home URLs, and the five tabs that hold them.
   Policy/AccessPolicy.swift  The allowlist. Change rules here.
+  Policy/OwnershipParser.swift  Reads who made a post off the post's page.
   Settings/AppSettings.swift User settings, saved in UserDefaults.
   Web/WebController.swift    One WKWebView per tab, navigation and policy enforcement.
   Web/WebViewPool.swift      Keeps web views alive across tab switches, applies settings.
+  Web/OwnershipChecker.swift Remembers your posts and looks up new ones.
   Web/Injected.swift         The in-page URL hook, hiding CSS, diagnostics script.
   Web/GuardedWebView.swift   SwiftUI wrapper.
   Views/                     Settings, Diagnostics, blocked banner.

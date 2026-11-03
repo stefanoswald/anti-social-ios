@@ -7,21 +7,42 @@ struct SettingsView: View {
 
     @State private var confirmLogout = false
     @State private var isClearing = false
+    /// The username boxes edit these, and they are saved when you finish
+    /// (Return, or closing Settings). Saving on every keystroke would point
+    /// the app at half-typed names, which are other people's accounts.
+    @State private var facebookName = ""
+    @State private var instagramName = ""
+    /// What the boxes showed when Settings opened. Only a name you changed is
+    /// saved, so a name the app learns meanwhile is not overwritten.
+    @State private var shownFacebookName = ""
+    @State private var shownInstagramName = ""
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Facebook username", text: $settings.facebookUsername)
+                    TextField("Facebook username", text: $facebookName)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    TextField("Instagram username", text: $settings.instagramUsername)
+                        .submitLabel(.done)
+                        .onSubmit(saveNames)
+                    TextField("Instagram username", text: $instagramName)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .submitLabel(.done)
+                        .onSubmit(saveNames)
                 } header: {
                     Text("Your accounts")
                 } footer: {
-                    Text("The app fills these in by itself once you have used each tab. They let you open your own profile and post there. Every other profile stays blocked.")
+                    Text("The app fills these in by itself once you have used each tab. They tell the app which profile and which posts are yours. Every other profile stays blocked.")
+                }
+
+                Section {
+                    Toggle("Open other people's posts I tap", isOn: $settings.openTappedPosts)
+                } header: {
+                    Text("Posts")
+                } footer: {
+                    Text("Your own posts, Reels, videos, and stories always open. With this on, a post you tap opens too, so you can read it and reply. It never moves on to the next one. Swiping or autoplay into another post is blocked. Turn this off to open only your own posts.")
                 }
 
                 Section {
@@ -29,13 +50,11 @@ struct SettingsView: View {
                 } header: {
                     Text("Posting")
                 } footer: {
-                    Text("Turns on the compose button: write a post, add a story, go live, or list something on Marketplace. Watching other people's Reels and Stories stays blocked either way.")
+                    Text("Turns on the compose button, so you can write a post, add a story, go live, or sell something on Marketplace.")
                 }
 
                 Section {
                     Toggle("Hide feed links inside pages", isOn: $settings.hideDistractions)
-                    Toggle("Allow single Reels from notifications", isOn: $settings.allowReelPermalinks)
-                    Toggle("Allow single group posts", isOn: $settings.allowGroupPosts)
                     Picker("Links that leave Facebook or Instagram", selection: $settings.externalLinks) {
                         ForEach(AppSettings.ExternalLinkBehavior.allCases) { behavior in
                             Text(behavior.label).tag(behavior)
@@ -45,7 +64,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Blocking")
                 } footer: {
-                    Text("Feeds, Reels, Watch, Stories, Explore, and other people's profiles are always blocked. These switches only fine-tune the edges.")
+                    Text("The home feed, the Reels and Watch feeds, the Stories feed, Explore, the Groups feed, and other people's profiles are always blocked. Your groups stay open.")
                 }
 
                 Section {
@@ -79,7 +98,7 @@ struct SettingsView: View {
 
                 Section("About") {
                     LabeledContent("Version", value: Self.versionString)
-                    Text("Anti-Social loads only the inbox, Marketplace, and notification pages. Everything else is stopped before it loads, so there is nothing to scroll.")
+                    Text("Anti-Social is for making, not scrolling. Messages, Marketplace, alerts, groups, your own posts, and posting all work. Feeds are stopped before they load, and nothing moves on to the next post by itself.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -88,9 +107,19 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Done") {
+                        saveNames()
+                        dismiss()
+                    }
                 }
             }
+            .onAppear {
+                facebookName = settings.facebookUsername
+                instagramName = settings.instagramUsername
+                shownFacebookName = facebookName
+                shownInstagramName = instagramName
+            }
+            .onDisappear(perform: saveNames)
             .confirmationDialog(
                 "Log out of Facebook and Instagram?",
                 isPresented: $confirmLogout,
@@ -105,6 +134,19 @@ struct SettingsView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             }
+        }
+    }
+
+    private func saveNames() {
+        let facebook = facebookName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let instagram = instagramName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if facebookName != shownFacebookName, facebook != settings.facebookUsername {
+            settings.facebookUsername = facebook
+            shownFacebookName = facebookName
+        }
+        if instagramName != shownInstagramName, instagram != settings.instagramUsername {
+            settings.instagramUsername = instagram
+            shownInstagramName = instagramName
         }
     }
 

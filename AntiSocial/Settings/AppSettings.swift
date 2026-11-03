@@ -23,13 +23,14 @@ final class AppSettings: ObservableObject {
         static let instagramUsername = "instagramUsername"
         static let desktopModeFacebook = "desktopModeFacebook"
         static let desktopModeInstagram = "desktopModeInstagram"
-        static let allowReelPermalinks = "allowReelPermalinks"
-        static let allowGroupPosts = "allowGroupPosts"
         static let externalLinks = "externalLinks"
         static let showBlockToasts = "showBlockToasts"
         static let hideDistractions = "hideDistractions"
         static let desktopViewportWidth = "desktopViewportWidth"
         static let allowPosting = "allowPosting"
+        static let openTappedPosts = "openTappedPosts"
+        static let facebookUserID = "facebookUserID"
+        static let instagramUserID = "instagramUserID"
     }
 
     /// Layout widths (in CSS pixels) the desktop site can be squeezed into.
@@ -45,25 +46,25 @@ final class AppSettings: ObservableObject {
             // the feed, so Facebook gets the desktop site by default.
             Key.desktopModeFacebook: true,
             Key.desktopModeInstagram: false,
-            Key.allowReelPermalinks: false,
-            Key.allowGroupPosts: true,
             Key.externalLinks: ExternalLinkBehavior.safari.rawValue,
             Key.showBlockToasts: true,
             Key.hideDistractions: true,
             Key.desktopViewportWidth: 760,
-            Key.allowPosting: true
+            Key.allowPosting: true,
+            Key.openTappedPosts: true
         ])
         facebookUsername = defaults.string(forKey: Key.facebookUsername) ?? ""
         instagramUsername = defaults.string(forKey: Key.instagramUsername) ?? ""
         desktopModeFacebook = defaults.bool(forKey: Key.desktopModeFacebook)
         desktopModeInstagram = defaults.bool(forKey: Key.desktopModeInstagram)
-        allowReelPermalinks = defaults.bool(forKey: Key.allowReelPermalinks)
-        allowGroupPosts = defaults.bool(forKey: Key.allowGroupPosts)
         externalLinks = ExternalLinkBehavior(rawValue: defaults.string(forKey: Key.externalLinks) ?? "") ?? .safari
         showBlockToasts = defaults.bool(forKey: Key.showBlockToasts)
         hideDistractions = defaults.bool(forKey: Key.hideDistractions)
         desktopViewportWidth = defaults.integer(forKey: Key.desktopViewportWidth)
         allowPosting = defaults.bool(forKey: Key.allowPosting)
+        openTappedPosts = defaults.bool(forKey: Key.openTappedPosts)
+        facebookUserID = defaults.string(forKey: Key.facebookUserID) ?? ""
+        instagramUserID = defaults.string(forKey: Key.instagramUserID) ?? ""
     }
 
     /// Your own Facebook username (the part after facebook.com/). Lets you open
@@ -77,6 +78,24 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(instagramUsername, forKey: Key.instagramUsername) }
     }
 
+    /// Your Facebook account number. Read from Facebook's own login cookie,
+    /// never typed in. Links often name you by this number.
+    @Published var facebookUserID: String {
+        didSet { defaults.set(facebookUserID, forKey: Key.facebookUserID) }
+    }
+
+    /// Your Instagram account number, read the same way.
+    @Published var instagramUserID: String {
+        didSet { defaults.set(instagramUserID, forKey: Key.instagramUserID) }
+    }
+
+    /// Someone else's post, Reel, video, or story opens when you tap it, so
+    /// you can read it and reply. Moving on to the next one by swiping or
+    /// autoplay stays blocked. Off means only your own posts open.
+    @Published var openTappedPosts: Bool {
+        didSet { defaults.set(openTappedPosts, forKey: Key.openTappedPosts) }
+    }
+
     /// Ask Facebook for the desktop site. Use this only if the mobile site
     /// refuses to show Messenger and pushes you to the app instead.
     @Published var desktopModeFacebook: Bool {
@@ -85,18 +104,6 @@ final class AppSettings: ObservableObject {
 
     @Published var desktopModeInstagram: Bool {
         didSet { defaults.set(desktopModeInstagram, forKey: Key.desktopModeInstagram) }
-    }
-
-    /// Let a single Reel open when a notification points at it (to answer
-    /// comments on your own Reels). Off by default because a Reel page can
-    /// swipe into the next Reel.
-    @Published var allowReelPermalinks: Bool {
-        didSet { defaults.set(allowReelPermalinks, forKey: Key.allowReelPermalinks) }
-    }
-
-    /// Let single group posts open from notifications. Group feeds stay blocked.
-    @Published var allowGroupPosts: Bool {
-        didSet { defaults.set(allowGroupPosts, forKey: Key.allowGroupPosts) }
     }
 
     /// What to do with links that leave Facebook or Instagram.
@@ -115,7 +122,7 @@ final class AppSettings: ObservableObject {
     }
 
     /// Lets you publish: the composer, Marketplace listings, creating a Story,
-    /// and Go Live. Watching Reels and other people's Stories stays blocked.
+    /// and Go Live.
     @Published var allowPosting: Bool {
         didSet { defaults.set(allowPosting, forKey: Key.allowPosting) }
     }
@@ -143,9 +150,10 @@ final class AppSettings: ObservableObject {
         PolicyOptions(
             facebookUsername: facebookUsername.trimmingCharacters(in: .whitespacesAndNewlines),
             instagramUsername: instagramUsername.trimmingCharacters(in: .whitespacesAndNewlines),
-            allowReelPermalinks: allowReelPermalinks,
-            allowGroupPosts: allowGroupPosts,
-            allowPosting: allowPosting
+            facebookUserID: facebookUserID,
+            instagramUserID: instagramUserID,
+            allowPosting: allowPosting,
+            openTappedPosts: openTappedPosts
         )
     }
 }

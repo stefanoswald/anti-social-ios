@@ -6,7 +6,9 @@ import UIKit
 /// tightened without guessing.
 struct DiagnosticsView: View {
     @ObservedObject var controller: WebController
+    @ObservedObject var ownership: OwnershipChecker
     @EnvironmentObject private var pool: WebViewPool
+    @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
 
     @State private var pageMap: String = ""
@@ -41,6 +43,20 @@ struct DiagnosticsView: View {
                             Label("Share page map", systemImage: "square.and.arrow.up")
                         }
                     }
+                }
+
+                Section {
+                    LabeledContent("Posts known to be yours", value: "\(ownership.knownCount)")
+                    LabeledContent("Facebook", value: identityLabel(settings.facebookUsername, settings.facebookUserID))
+                    LabeledContent("Instagram", value: identityLabel(settings.instagramUsername, settings.instagramUserID))
+                    Button("Forget the posts it learned", role: .destructive) {
+                        ownership.forgetAll()
+                    }
+                    .disabled(ownership.knownCount == 0)
+                } header: {
+                    Text("Your posts")
+                } footer: {
+                    Text("The app learns your posts from links that name you and from your own Reels grid. Anything new is checked once by reading who the post's page says made it.")
                 }
 
                 Section {
@@ -94,6 +110,11 @@ struct DiagnosticsView: View {
                 }
             }
         }
+    }
+
+    private func identityLabel(_ username: String, _ id: String) -> String {
+        let parts = [username, id].filter { !$0.isEmpty }
+        return parts.isEmpty ? "not known yet" : parts.joined(separator: " · ")
     }
 
     private var blockLogText: String {

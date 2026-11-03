@@ -60,6 +60,8 @@ final class WebController: NSObject, ObservableObject {
     @Published private(set) var progress: Double = 0
     @Published private(set) var loadError: String?
     @Published var lastBlock: BlockEvent?
+    /// True while the app checks whether the post being opened is yours.
+    @Published private(set) var isCheckingOwner = false
 
     var policy: AccessPolicy
     var externalLinks: AppSettings.ExternalLinkBehavior
@@ -67,6 +69,12 @@ final class WebController: NSObject, ObservableObject {
     /// Fired when the app works out which account is signed in, so the profile
     /// rules know which profile is yours without you typing it in Settings.
     var onLearnUsername: ((SiteKind, String) -> Void)?
+    /// Fired after each full page load. The pool uses it to read your account
+    /// numbers from the login cookies.
+    var onPageFinished: (() -> Void)?
+
+    /// Remembers which posts are yours and looks up new ones.
+    let ownership: OwnershipChecker
 
     /// Shows up in the Xcode console while the app is attached. Handy for
     /// seeing exactly which URL a site tried to reach.
@@ -77,9 +85,43 @@ final class WebController: NSObject, ObservableObject {
     private var lastBounce: Date = .distantPast
     private var currentHideDistractions: Bool
     private var currentViewportWidth: Int
+    private var currentPageConfig: String
+    /// Bumped for every in-page ownership check, so a slow answer about a post
+    /// you already left does not act on the page you are on now.
+    private var checkGeneration = 0
+    /// The post an in-page check is about, while one runs.
+    private var pendingCheckKey: String?
+    /// True while an in-page check runs.
+    private var inPageCheckActive = false
+    /// Real page loads waiting for an ownership answer.
+    private var loadChecksRunning = 0
+    /// True while the page is hidden (a post being checked, or on the way
+    /// out after a block).
+    private var pageHidden = false
     /// Set while facebook.com/me is resolving. Facebook answers it with a
     /// redirect to your own profile, which is how the app learns your username.
     private var awaitingOwnProfile = false
+    /// Posts you tapped, and when. A tapped post opens. The next one does not
+    /// open by itself.
+    private var tapGrants: [String: Date] = [:]
+    /// Posts already open or opened in this tab. Coming back to one is fine.
+    private var openedKeys: Set<String> = []
+    /// The last post shown, to return to when a player moves on to someone
+    /// else's.
+    private var lastShownPostURL: URL?
+    /// How the page last changed its own address (pushState, replaceState, ...).
+    private var lastInPageWhy = ""
+    /// The address the page last reported, to tell where an in-page change
+    /// came from.
+    private var lastPageURL: URL?
+    /// When you last tapped anywhere on the page. A tap that does not name a
+    /// post (a shared-post card, a share link that redirects) still opens the
+    /// first post it leads to, as long as that post is reached from a page
+    /// that is not a post itself. A player moving on from one post to the
+    /// next never counts.
+    private var lastClickAt: Date = .distantPast
+    /// How long a tap counts for the post it opens.
+    private static let tapWindow: TimeInterval = 10
     private let refreshControl = UIRefreshControl()
 
     /// Private-but-widely-used policy value that tells WebKit not to hand the
@@ -95,13 +137,17 @@ final class WebController: NSObject, ObservableObject {
         externalLinks: AppSettings.ExternalLinkBehavior,
         hideDistractions: Bool,
         viewportWidth: Int,
-        userAgent: String
+        pageConfig: String,
+        userAgent: String,
+        ownership: OwnershipChecker
     ) {
         self.tab = tab
         self.policy = policy
         self.externalLinks = externalLinks
         self.currentHideDistractions = hideDistractions
         self.currentViewportWidth = viewportWidth
+        self.currentPageConfig = pageConfig
+        self.ownership = ownership
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = dataStore
@@ -129,7 +175,8 @@ final class WebController: NSObject, ObservableObject {
         Self.installScripts(
             in: configuration.userContentController,
             hideDistractions: hideDistractions,
-            viewportWidth: viewportWidth
+            viewportWidth: viewportWidth,
+            pageConfig: pageConfig
         )
         configuration.userContentController.add(WeakScriptMessageHandler(self), name: Injected.handlerName)
 
@@ -160,9 +207,22 @@ final class WebController: NSObject, ObservableObject {
         }
     }
 
+    /// Where this tab starts. Your Instagram posts live at your own profile,
+    /// so that one depends on knowing your username.
+    var homeURL: URL? {
+        guard tab == .instagramMyPosts else { return tab.home }
+        let name = policy.options.instagramUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        return URL(string: "https://www.instagram.com/\(name)/")
+    }
+
     func goHome() {
         clearError()
-        webView.load(URLRequest(url: tab.home))
+        guard let url = homeURL else {
+            loadError = "Open IG Inbox once so the app can learn your Instagram username. Then come back here."
+            return
+        }
+        load(url)
     }
 
     /// Opens the right page for a compose action on this tab's site. Facebook
@@ -194,8 +254,25 @@ final class WebController: NSObject, ObservableObject {
 
     private func load(_ url: URL) {
         clearError()
+        endOwnerCheck()
         awaitingOwnProfile = (url.path.lowercased() == "/me")
         webView.load(URLRequest(url: url))
+    }
+
+    /// Drops the in-page ownership check in progress. Its answer, when it
+    /// comes, is about a page you have already left.
+    private func endOwnerCheck() {
+        checkGeneration += 1
+        pendingCheckKey = nil
+        inPageCheckActive = false
+        updateCheckingState()
+    }
+
+    private func updateCheckingState() {
+        let checking = inPageCheckActive || loadChecksRunning > 0
+        if isCheckingOwner != checking {
+            isCheckingOwner = checking
+        }
     }
 
     func goBack() {
@@ -208,10 +285,30 @@ final class WebController: NSObject, ObservableObject {
 
     func reload() {
         clearError()
-        if webView.url == nil {
+        if webView.url == nil || pageHidden {
+            // A hidden page is a post that was refused or is still being
+            // checked. Reloading it would only show it. Start over instead.
             goHome()
         } else {
             webView.reload()
+        }
+    }
+
+    /// Forgets every post opened by a tap. Used when "Open other people's
+    /// posts I tap" is switched off, before `recheckCurrentPage`.
+    func forgetTappedPosts() {
+        openedKeys.removeAll()
+        tapGrants.removeAll()
+        lastClickAt = .distantPast
+    }
+
+    /// Checks the page you are on against the current rules, and leaves it if
+    /// it no longer passes. Used when "Open other people's posts I tap" is
+    /// switched off.
+    func recheckCurrentPage() {
+        guard hasLoadedOnce, let url = webView.url, url.scheme?.hasPrefix("http") == true else { return }
+        if !isAllowedWithoutChecking(url) {
+            goHome()
         }
     }
 
@@ -222,8 +319,10 @@ final class WebController: NSObject, ObservableObject {
     }
 
     /// Applies a settings change. Reloads once if anything that affects the
-    /// page (user agent, injected scripts) actually changed.
-    func applyConfiguration(userAgent: String, hideDistractions: Bool, viewportWidth: Int) {
+    /// page (user agent, injected scripts) actually changed. A change to the
+    /// page settings alone (who you are, which posts are yours) reaches the
+    /// open page directly, with no reload.
+    func applyConfiguration(userAgent: String, hideDistractions: Bool, viewportWidth: Int, pageConfig: String) {
         var needsReload = false
 
         if webView.customUserAgent != userAgent {
@@ -231,16 +330,32 @@ final class WebController: NSObject, ObservableObject {
             needsReload = true
         }
 
-        if hideDistractions != currentHideDistractions || viewportWidth != currentViewportWidth {
+        let scriptsChanged = hideDistractions != currentHideDistractions || viewportWidth != currentViewportWidth
+        let configChanged = pageConfig != currentPageConfig
+
+        if scriptsChanged || configChanged {
             currentHideDistractions = hideDistractions
             currentViewportWidth = viewportWidth
+            currentPageConfig = pageConfig
             let controller = webView.configuration.userContentController
             controller.removeAllUserScripts()
-            Self.installScripts(in: controller, hideDistractions: hideDistractions, viewportWidth: viewportWidth)
-            needsReload = true
+            Self.installScripts(
+                in: controller,
+                hideDistractions: hideDistractions,
+                viewportWidth: viewportWidth,
+                pageConfig: pageConfig
+            )
+            if scriptsChanged {
+                needsReload = true
+            } else if webView.url != nil {
+                webView.evaluateJavaScript(pageConfig, completionHandler: nil)
+            }
         }
 
         if needsReload && hasLoadedOnce {
+            goHome()
+        } else if hasLoadedOnce, webView.url == nil, loadError != nil, homeURL != nil {
+            // Your posts tab was waiting for your Instagram username.
             goHome()
         }
     }
@@ -260,7 +375,19 @@ final class WebController: NSObject, ObservableObject {
 
     // MARK: - Setup
 
-    private static func installScripts(in controller: WKUserContentController, hideDistractions: Bool, viewportWidth: Int) {
+    private static func installScripts(
+        in controller: WKUserContentController,
+        hideDistractions: Bool,
+        viewportWidth: Int,
+        pageConfig: String
+    ) {
+        let config = WKUserScript(
+            source: pageConfig,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
+        controller.addUserScript(config)
+
         let hook = WKUserScript(
             source: Injected.navigationHook,
             injectionTime: .atDocumentStart,
@@ -343,7 +470,7 @@ final class WebController: NSObject, ObservableObject {
     /// previous allowed page so scroll position and state survive. Fall back
     /// to the tab's home page.
     private func bounce() {
-        webView.evaluateJavaScript("window.__as_hide && window.__as_hide();", completionHandler: nil)
+        hidePage()
 
         let now = Date()
         let tooSoon = now.timeIntervalSince(lastBounce) < 1.0
@@ -352,11 +479,275 @@ final class WebController: NSObject, ObservableObject {
         if !tooSoon,
            webView.canGoBack,
            let backURL = webView.backForwardList.backItem?.url,
-           case .allow = policy.decide(backURL) {
+           isAllowedWithoutChecking(backURL) {
             webView.goBack()
         } else {
             goHome()
         }
+    }
+
+    /// Allowed outright, a post already known to be yours, or a post you
+    /// opened with a tap.
+    private func isAllowedWithoutChecking(_ url: URL) -> Bool {
+        switch policy.decide(url) {
+        case .allow:
+            return true
+        case .verify(let ref):
+            return ownership.verdict(for: ref) == .mine
+                || (policy.options.openTappedPosts && openedKeys.contains(ref.key))
+        case .block, .external:
+            return false
+        }
+    }
+
+    private func hidePage() {
+        pageHidden = true
+        webView.evaluateJavaScript("window.__as_hide && window.__as_hide();", completionHandler: nil)
+    }
+
+    private func showPage() {
+        pageHidden = false
+        webView.evaluateJavaScript("window.__as_show && window.__as_show();", completionHandler: nil)
+    }
+
+    /// The post a URL points at, judged the same way the rules judge it
+    /// (redirect wrappers included).
+    private func pendingKey(for url: URL?) -> String? {
+        guard let url, case .verify(let ref) = policy.decide(url, inPage: true) else { return nil }
+        return ref.key
+    }
+
+    // MARK: - Your posts
+
+    /// A single post is about to show. Open it if it is yours or you tapped
+    /// it; otherwise block it. `decisionHandler` is set for real page loads,
+    /// which wait for the answer before anything loads. In-page changes have
+    /// already happened, so the page is hidden until the answer comes back.
+    private func verify(
+        _ ref: PostRef,
+        url: URL,
+        decisionHandler: ((WKNavigationActionPolicy) -> Void)?
+    ) {
+        let inPage = decisionHandler == nil
+        if inPage {
+            checkGeneration += 1
+            pendingCheckKey = ref.key
+        }
+        let generation = checkGeneration
+
+        // Yours, or something you tapped: open it now.
+        let mine = ownership.verdict(for: ref) == .mine
+        if mine || (policy.options.openTappedPosts && isTapped(ref.key)) {
+            if inPage {
+                inPageCheckActive = false
+                pendingCheckKey = nil
+            }
+            updateCheckingState()
+            openPost(ref, url: url, decisionHandler: decisionHandler)
+            return
+        }
+
+        if let known = ownership.verdict(for: ref) {
+            finishCheck(known, ref: ref, url: url, generation: generation, decisionHandler: decisionHandler)
+            return
+        }
+        if let other = ref.otherOwner {
+            // The link names someone else, and this is not a collab the app
+            // has seen on your grid.
+            finishCheck(.someoneElse(other), ref: ref, url: url, generation: generation, decisionHandler: decisionHandler)
+            return
+        }
+
+        if inPage {
+            inPageCheckActive = true
+            hidePage()
+        } else {
+            loadChecksRunning += 1
+        }
+        updateCheckingState()
+
+        let identity = policy.options.ownIdentity
+        Self.log.info("[\(self.tab.title, privacy: .public)] checking owner of \(ref.key, privacy: .public)")
+        Task { @MainActor [weak self] in
+            guard let self else {
+                decisionHandler?(.cancel)
+                return
+            }
+            let answer = await self.ownership.check(ref, identity: identity)
+            if !inPage {
+                self.loadChecksRunning = max(0, self.loadChecksRunning - 1)
+            }
+            self.finishCheck(answer, ref: ref, url: url, generation: generation, decisionHandler: decisionHandler)
+        }
+    }
+
+    private func finishCheck(
+        _ answer: Ownership,
+        ref: PostRef,
+        url: URL,
+        generation: Int,
+        decisionHandler: ((WKNavigationActionPolicy) -> Void)?
+    ) {
+        // For in-page changes, act only if this is still the latest check and
+        // you are still on that post.
+        let isCurrent = generation == checkGeneration
+        if decisionHandler == nil && isCurrent {
+            inPageCheckActive = false
+            pendingCheckKey = nil
+        }
+        updateCheckingState()
+
+        // The rules may have changed while the check ran (your name was just
+        // learned, say), so the page may now pass outright.
+        if decisionHandler == nil, isCurrent, let here = currentURL ?? webView.url,
+           case .allow = policy.decide(here, inPage: true) {
+            showPage()
+            return
+        }
+        let actOnPage = isCurrent && pendingKey(for: currentURL ?? webView.url) == ref.key
+
+        if answer == .mine {
+            Self.log.info("[\(self.tab.title, privacy: .public)] yours: \(ref.key, privacy: .public)")
+            if let decisionHandler {
+                openPost(ref, url: url, decisionHandler: decisionHandler)
+            } else if actOnPage {
+                openPost(ref, url: url, decisionHandler: nil)
+            }
+            pushKnown([ref.key])
+            return
+        }
+
+        let reason = blockReason(for: ref, answer: answer)
+        if let decisionHandler {
+            decisionHandler(.cancel)
+            recordBlock(url, reason: reason)
+            if webView.url == nil || policy.isAuthPage(webView.url) {
+                goHome()
+            }
+        } else if actOnPage {
+            recordBlock(url, reason: reason)
+            leaveBlockedPost(ref)
+        }
+    }
+
+    /// Shows a post that passed: yours, or one you tapped.
+    private func openPost(_ ref: PostRef, url: URL, decisionHandler: ((WKNavigationActionPolicy) -> Void)?) {
+        markOpened(ref, url: url)
+        if let decisionHandler {
+            decisionHandler(Self.allowWithoutAppLink)
+        } else {
+            webView.evaluateJavaScript(Injected.openedScript([ref.key]), completionHandler: nil)
+            showPage()
+        }
+    }
+
+    /// A post is open. Coming back to it later is fine.
+    private func markOpened(_ ref: PostRef, url: URL) {
+        openedKeys.insert(ref.key)
+        lastShownPostURL = url
+        lastClickAt = .distantPast
+    }
+
+    /// Short words for the "Blocked" banner.
+    private func blockReason(for ref: PostRef, answer: Ownership) -> String {
+        if !policy.options.openTappedPosts {
+            return answer == .unknown ? "Could not confirm it is your post" : "Not your post"
+        }
+        if ref.kind.isVideo {
+            return "Next Reel"
+        }
+        if ref.kind.isStory {
+            return "Next story"
+        }
+        return "Only posts you tap open"
+    }
+
+    /// Gets away from a post that moved on by itself. Facebook's Reels player
+    /// swaps the address in place (replaceState), so there is no history
+    /// entry to step back to. Going back to the last post shown is the
+    /// natural way out.
+    private func leaveBlockedPost(_ ref: PostRef) {
+        if lastInPageWhy == "replaceState", let previous = lastShownPostURL,
+           pendingKey(for: previous) != ref.key {
+            hidePage()
+            load(previous)
+        } else {
+            bounce()
+        }
+    }
+
+    /// Remembers a tap. A tap on a link to a post lets that post open. Any
+    /// tap at all also lets the next post reached from a non-post page open
+    /// (see `lastClickAt`).
+    private func noteTap(_ url: URL?) {
+        let now = Date()
+        lastClickAt = now
+        if let key = pendingKey(for: url) {
+            tapGrants[key] = now
+        }
+        if tapGrants.count > 200 {
+            tapGrants = tapGrants.filter { now.timeIntervalSince($0.value) < Self.tapWindow }
+        }
+    }
+
+    /// Uses up a recent tap for this post. `from` is the page the post was
+    /// reached from. A real page load (`inPage` false) needs no such check,
+    /// because a player never makes one on its own.
+    @discardableResult
+    private func useRecentTap(_ key: String, from: URL?, inPage: Bool) -> Bool {
+        let now = Date()
+        guard now.timeIntervalSince(lastClickAt) < Self.tapWindow else { return false }
+        if inPage {
+            guard let from, AccessPolicy.postLink(in: from) == nil else { return false }
+        }
+        lastClickAt = .distantPast
+        tapGrants[key] = now
+        return true
+    }
+
+    private func isTapped(_ key: String) -> Bool {
+        if openedKeys.contains(key) {
+            return true
+        }
+        guard let at = tapGrants[key] else { return false }
+        return Date().timeIntervalSince(at) < Self.tapWindow
+    }
+
+    /// A link that names you proves the post is yours. Remember it.
+    private func learnFromURL(_ url: URL) {
+        guard let key = policy.ownedPostKey(in: url) else { return }
+        if !ownership.markMine([key]).isEmpty {
+            pushKnown([key])
+        }
+    }
+
+    /// Links the page pointed out as yours. Each one is checked here again:
+    /// it counts only if it names you, or if it sits on your own grid and is
+    /// the kind of post that grid holds (Reels and videos on Facebook).
+    private func learnLinks(_ hrefs: [String], reportedPage: URL) {
+        let page = webView.url ?? reportedPage
+        let onGrid = policy.isOwnPostGrid(page)
+        let gridKind = AccessPolicy.site(for: page) == .facebook ? "fb:video:" : "ig:"
+        var keys: [String] = []
+        for href in hrefs.prefix(300) {
+            guard let url = URL(string: href, relativeTo: page)?.absoluteURL else { continue }
+            if let key = policy.ownedPostKey(in: url) {
+                keys.append(key)
+            } else if onGrid, let key = AccessPolicy.postLink(in: url)?.ref.key, key.hasPrefix(gridKind) {
+                keys.append(key)
+            }
+        }
+        let learned = ownership.markMine(keys)
+        if !learned.isEmpty {
+            Self.log.info("[\(self.tab.title, privacy: .public)] learned \(learned.count) of your posts")
+            pushKnown(learned)
+        }
+    }
+
+    /// Tells the open page about posts now known to be yours.
+    private func pushKnown(_ keys: [String]) {
+        guard !keys.isEmpty, webView.url != nil else { return }
+        webView.evaluateJavaScript(Injected.addKnownScript(keys), completionHandler: nil)
     }
 }
 
@@ -399,10 +790,21 @@ extension WebController: WKNavigationDelegate {
             return
         }
 
+        // A link you tapped yourself.
+        if navigationAction.navigationType == .linkActivated {
+            noteTap(url)
+        }
+
         switch policy.decide(url) {
         case .allow:
             Self.log.info("[\(self.tab.title, privacy: .public)] allow \(url.absoluteString, privacy: .public)")
+            learnFromURL(url)
             decisionHandler(Self.allowWithoutAppLink)
+
+        case .verify(let ref):
+            // A share link you tapped redirects here.
+            useRecentTap(ref.key, from: nil, inPage: false)
+            verify(ref, url: url, decisionHandler: decisionHandler)
 
         case .external(let target):
             Self.log.notice("[\(self.tab.title, privacy: .public)] EXTERNAL \(target.absoluteString, privacy: .public)")
@@ -429,11 +831,20 @@ extension WebController: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        webView.evaluateJavaScript("window.__as_show && window.__as_show();", completionHandler: nil)
+        lastPageURL = webView.url
+        // A new page replaced the old one. A check about a different post on
+        // the old page no longer matters.
+        if let pending = pendingCheckKey, pendingKey(for: webView.url) != pending {
+            endOwnerCheck()
+        }
+        if pendingCheckKey == nil {
+            showPage()
+        }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         refreshControl.endRefreshing()
+        onPageFinished?()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -441,7 +852,9 @@ extension WebController: WKNavigationDelegate {
         let nsError = error as NSError
         // -999 is "cancelled", which is what our own blocks look like.
         guard nsError.code != NSURLErrorCancelled else { return }
-        if webView.url == nil || !hasLoadedOnce {
+        // A hidden page means the app was leaving it. If that trip failed,
+        // say so instead of leaving a blank screen.
+        if webView.url == nil || !hasLoadedOnce || pageHidden {
             loadError = nsError.localizedDescription
         }
     }
@@ -472,8 +885,11 @@ extension WebController: WKUIDelegate {
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
         guard let url = navigationAction.request.url else { return nil }
+        // On iOS a page can open a window only from a tap, so this is one.
+        noteTap(url)
         switch policy.decide(url) {
-        case .allow:
+        case .allow, .verify:
+            // A post goes through the normal check on its way in.
             webView.load(URLRequest(url: url))
         case .external(let target):
             handleExternal(target)
@@ -574,23 +990,50 @@ extension WebController: WKScriptMessageHandler {
             guard let string = body["url"] as? String, let url = URL(string: string) else { return }
             currentURL = url
             let why = body["why"] as? String ?? "?"
+            lastInPageWhy = why
+            let from = lastPageURL
+            lastPageURL = url
             switch policy.decide(url, inPage: true) {
             case .allow:
                 Self.log.info("[\(self.tab.title, privacy: .public)] in-page (\(why, privacy: .public)) allow \(url.absoluteString, privacy: .public)")
-                webView.evaluateJavaScript("window.__as_show && window.__as_show();", completionHandler: nil)
+                endOwnerCheck()
+                learnFromURL(url)
+                // A post that opens outright (yours, or in a group) is where a
+                // player that moves on gets sent back to.
+                lastShownPostURL = AccessPolicy.postLink(in: url) != nil ? url : nil
+                showPage()
+            case .verify(let ref):
+                if why == "pushState" || why == "replaceState" || why == "poll" {
+                    useRecentTap(ref.key, from: from, inPage: true)
+                }
+                verify(ref, url: url, decisionHandler: nil)
             case .external:
                 // A page cannot pushState to another origin, so this is only
                 // here for completeness.
+                endOwnerCheck()
                 recordBlock(url, reason: "Outside link")
                 bounce()
             case .block(let reason):
+                endOwnerCheck()
                 recordBlock(url, reason: reason)
                 bounce()
             }
+
+        case "tap":
+            noteTap((body["href"] as? String).flatMap { URL(string: $0) })
+
+        case "links":
+            guard let hrefs = body["hrefs"] as? [String],
+                  let pageString = body["page"] as? String,
+                  let page = URL(string: pageString) else { return }
+            learnLinks(hrefs, reportedPage: page)
+
         case "owner":
             guard let name = body["username"] as? String, !name.isEmpty else { return }
             let site: SiteKind = (body["site"] as? String) == "instagram" ? .instagram : .facebook
-            if site == .instagram, policy.options.instagramUsername.caseInsensitiveCompare(name) != .orderedSame {
+            // Fill in an empty username only. Pages also show other people's
+            // pictures (commenters, say), so a guess never replaces a known name.
+            if site == .instagram, policy.options.instagramUsername.isEmpty {
                 Self.log.notice("[\(self.tab.title, privacy: .public)] learned instagram username \(name, privacy: .public)")
                 policy.options.instagramUsername = name
                 onLearnUsername?(.instagram, name)
