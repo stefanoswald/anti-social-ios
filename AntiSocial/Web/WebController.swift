@@ -50,13 +50,16 @@ struct Notice: Identifiable, Equatable {
     let text: String
 }
 
-/// A record of something the app refused to load.
+/// A record of something the app refused to load, or of something odd the
+/// page did (like jumping back to the top), for the Diagnostics screen.
 struct BlockEvent: Identifiable {
     let id = UUID()
     let date: Date
     let tabTitle: String
     let url: URL
     let reason: String
+    /// More about what happened, when there is more to say.
+    var detail: String = ""
 }
 
 /// Owns one WKWebView and enforces the allowlist on it.
@@ -153,6 +156,21 @@ final class WebController: NSObject, ObservableObject {
     private var pendingCompose: PendingCompose?
     /// The compose action whose script is running on the page.
     private var composeInFlight: ComposeAction?
+    /// When the app itself last started a page load or a reload. Anything
+    /// else that reloads the page is written into Diagnostics.
+    private var lastOwnLoad: Date = .distantPast
+    /// When the "one video at a time" note last showed.
+    private var lastVideoNotice: Date = .distantPast
+    /// When you last tapped anything. Unlike `lastClickAt`, nothing uses
+    /// this up.
+    private var lastTapNoted: Date = .distantPast
+    /// The last profile opened by its number, and when. Facebook can change
+    /// that address to the person's name right after, and the name should
+    /// open too.
+    private var numberProfile: (key: String, at: Date) = ("", .distantPast)
+    /// The last post the app went back to after a block, and when, so a
+    /// page that keeps moving on is not reloaded over and over.
+    private var lastLeave: (url: URL?, at: Date) = (nil, .distantPast)
     private let refreshControl = UIRefreshControl()
 
     /// Private-but-widely-used policy value that tells WebKit not to hand the
@@ -352,6 +370,7 @@ final class WebController: NSObject, ObservableObject {
         pendingCompose = nil
         composeInFlight = nil
         awaitingOwnProfile = (url.path.lowercased() == "/me")
+        lastOwnLoad = Date()
         webView.load(URLRequest(url: url))
     }
 
@@ -386,12 +405,13 @@ final class WebController: NSObject, ObservableObject {
             // checked. Reloading it would only show it. Start over instead.
             goHome()
         } else {
+            lastOwnLoad = Date()
             webView.reload()
         }
     }
 
-    /// Forgets every post opened by a tap. Used when "Open other people's
-    /// posts I tap" is switched off, before `recheckCurrentPage`.
+    /// Forgets every post opened by a tap. Used when "Open posts and
+    /// profiles I tap" is switched off, before `recheckCurrentPage`.
     func forgetTappedPosts() {
         openedKeys.removeAll()
         tapGrants.removeAll()
@@ -399,7 +419,7 @@ final class WebController: NSObject, ObservableObject {
     }
 
     /// Checks the page you are on against the current rules, and leaves it if
-    /// it no longer passes. Used when "Open other people's posts I tap" is
+    /// it no longer passes. Used when "Open posts and profiles I tap" is
     /// switched off.
     func recheckCurrentPage() {
         guard hasLoadedOnce, let url = webView.url, url.scheme?.hasPrefix("http") == true else { return }
@@ -553,6 +573,21 @@ final class WebController: NSObject, ObservableObject {
         Self.log.notice("[\(self.tab.title, privacy: .public)] BLOCKED (\(reason, privacy: .public)) \(url.absoluteString, privacy: .public) <- from \(from, privacy: .public)")
     }
 
+    /// Writes something odd the page did into Diagnostics, without the
+    /// "Blocked" banner.
+    private func recordEvent(_ url: URL, reason: String, detail: String = "") {
+        onBlock?(BlockEvent(date: Date(), tabTitle: tab.title, url: url, reason: reason, detail: detail))
+        Self.log.notice("[\(self.tab.title, privacy: .public)] \(reason, privacy: .public) \(detail, privacy: .public) \(url.absoluteString, privacy: .public)")
+    }
+
+    /// One video at a time. Says so, now and then, when the app stops the
+    /// next video.
+    private func showOneVideoNotice() {
+        guard policy.options.openTappedPosts, Date().timeIntervalSince(lastVideoNotice) > 6 else { return }
+        lastVideoNotice = Date()
+        showNotice("One video at a time. Go back, then tap the next one you want to watch.")
+    }
+
     private func handleExternal(_ url: URL) {
         switch externalLinks {
         case .safari:
@@ -619,9 +654,15 @@ final class WebController: NSObject, ObservableObject {
     /// it; otherwise block it. `decisionHandler` is set for real page loads,
     /// which wait for the answer before anything loads. In-page changes have
     /// already happened, so the page is hidden until the answer comes back.
+    ///
+    /// `from` is the page it was reached from. One video at a time: a tap on
+    /// another video from a video page does not open it, unless it is yours
+    /// or you watched it already. Going back and forward is never blocked.
     private func verify(
         _ ref: PostRef,
         url: URL,
+        from: URL?,
+        backForward: Bool,
         decisionHandler: ((WKNavigationActionPolicy) -> Void)?
     ) {
         let inPage = decisionHandler == nil
@@ -631,9 +672,12 @@ final class WebController: NSObject, ObservableObject {
         }
         let generation = checkGeneration
 
+        let secondVideo = ref.kind.isVideo && !backForward && !openedKeys.contains(ref.key)
+            && Self.isOtherVideo(from, key: ref.key)
+
         // Yours, or something you tapped: open it now.
         let mine = ownership.verdict(for: ref) == .mine
-        if mine || (policy.options.openTappedPosts && isTapped(ref.key)) {
+        if mine || (policy.options.openTappedPosts && isTapped(ref.key) && !secondVideo) {
             if inPage {
                 inPageCheckActive = false
                 pendingCheckKey = nil
@@ -644,13 +688,13 @@ final class WebController: NSObject, ObservableObject {
         }
 
         if let known = ownership.verdict(for: ref) {
-            finishCheck(known, ref: ref, url: url, generation: generation, decisionHandler: decisionHandler)
+            finishCheck(known, ref: ref, url: url, generation: generation, secondVideo: secondVideo, decisionHandler: decisionHandler)
             return
         }
         if let other = ref.otherOwner {
             // The link names someone else, and this is not a collab the app
             // has seen on your grid.
-            finishCheck(.someoneElse(other), ref: ref, url: url, generation: generation, decisionHandler: decisionHandler)
+            finishCheck(.someoneElse(other), ref: ref, url: url, generation: generation, secondVideo: secondVideo, decisionHandler: decisionHandler)
             return
         }
 
@@ -673,8 +717,14 @@ final class WebController: NSObject, ObservableObject {
             if !inPage {
                 self.loadChecksRunning = max(0, self.loadChecksRunning - 1)
             }
-            self.finishCheck(answer, ref: ref, url: url, generation: generation, decisionHandler: decisionHandler)
+            self.finishCheck(answer, ref: ref, url: url, generation: generation, secondVideo: secondVideo, decisionHandler: decisionHandler)
         }
+    }
+
+    /// True when `from` is a video other than the one with `key`.
+    private static func isOtherVideo(_ from: URL?, key: String) -> Bool {
+        guard let from, let link = AccessPolicy.postLink(in: from) else { return false }
+        return link.kind.isVideo && link.ref.key != key
     }
 
     private func finishCheck(
@@ -682,6 +732,7 @@ final class WebController: NSObject, ObservableObject {
         ref: PostRef,
         url: URL,
         generation: Int,
+        secondVideo: Bool = false,
         decisionHandler: ((WKNavigationActionPolicy) -> Void)?
     ) {
         // For in-page changes, act only if this is still the latest check and
@@ -713,15 +764,17 @@ final class WebController: NSObject, ObservableObject {
             return
         }
 
-        let reason = blockReason(for: ref, answer: answer)
+        let reason = blockReason(for: ref, answer: answer, secondVideo: secondVideo)
         if let decisionHandler {
             decisionHandler(.cancel)
             recordBlock(url, reason: reason)
+            if secondVideo { showOneVideoNotice() }
             if webView.url == nil || policy.isAuthPage(webView.url) {
                 goHome()
             }
         } else if actOnPage {
             recordBlock(url, reason: reason)
+            if secondVideo { showOneVideoNotice() }
             leaveBlockedPost(ref)
         }
     }
@@ -733,6 +786,11 @@ final class WebController: NSObject, ObservableObject {
             decisionHandler(Self.allowWithoutAppLink)
         } else {
             webView.evaluateJavaScript(Injected.openedScript([ref.key]), completionHandler: nil)
+            // Tell the page it is yours, too. The page only stops short and
+            // holds back videos on other people's things.
+            if ownership.verdict(for: ref) == .mine {
+                pushKnown([ref.key])
+            }
             showPage()
         }
     }
@@ -742,18 +800,38 @@ final class WebController: NSObject, ObservableObject {
         openedKeys.insert(ref.key)
         lastShownPostURL = url
         lastClickAt = .distantPast
+        if ref.kind.isProfile, Self.isNumberProfile(ref.key) {
+            numberProfile = (ref.key, Date())
+        }
+    }
+
+    private static func isNumberProfile(_ key: String) -> Bool {
+        key.hasPrefix("fb:profile:") && AccessPolicy.isDigits(String(key.dropFirst("fb:profile:".count)))
+    }
+
+    /// A profile opened by its number a moment ago, now shown under the
+    /// person's name.
+    private func isRenamedProfile(_ ref: PostRef) -> Bool {
+        ref.kind.isProfile && ref.key.hasPrefix("fb:profile:") && !Self.isNumberProfile(ref.key)
+            && !numberProfile.key.isEmpty && Date().timeIntervalSince(numberProfile.at) < 5
     }
 
     /// Short words for the "Blocked" banner.
-    private func blockReason(for ref: PostRef, answer: Ownership) -> String {
+    private func blockReason(for ref: PostRef, answer: Ownership, secondVideo: Bool = false) -> String {
         if !policy.options.openTappedPosts {
             return answer == .unknown ? "Could not confirm it is your post" : "Not your post"
+        }
+        if secondVideo {
+            return "One video at a time"
         }
         if ref.kind.isVideo {
             return "Next Reel"
         }
         if ref.kind.isStory {
             return "Next story"
+        }
+        if ref.kind.isProfile {
+            return "Only profiles you tap open"
         }
         return "Only posts you tap open"
     }
@@ -763,8 +841,11 @@ final class WebController: NSObject, ObservableObject {
     /// entry to step back to. Going back to the last post shown is the
     /// natural way out.
     private func leaveBlockedPost(_ ref: PostRef) {
+        let now = Date()
         if lastInPageWhy == "replaceState", let previous = lastShownPostURL,
-           pendingKey(for: previous) != ref.key {
+           pendingKey(for: previous) != ref.key,
+           !(lastLeave.url == previous && now.timeIntervalSince(lastLeave.at) < 5) {
+            lastLeave = (previous, now)
             hidePage()
             load(previous)
         } else {
@@ -778,6 +859,7 @@ final class WebController: NSObject, ObservableObject {
     private func noteTap(_ url: URL?) {
         let now = Date()
         lastClickAt = now
+        lastTapNoted = now
         if let key = pendingKey(for: url) {
             tapGrants[key] = now
         }
@@ -788,16 +870,22 @@ final class WebController: NSObject, ObservableObject {
 
     /// Uses up a recent tap for this post. `from` is the page the post was
     /// reached from. A real page load (`inPage` false) needs no such check,
-    /// because a player never makes one on its own.
+    /// because a player never makes one on its own. Neither does a profile:
+    /// a player never moves on to one by itself, so tapping a name on a post
+    /// opens that person's profile.
     @discardableResult
-    private func useRecentTap(_ key: String, from: URL?, inPage: Bool) -> Bool {
+    private func useRecentTap(_ ref: PostRef, from: URL?, inPage: Bool) -> Bool {
         let now = Date()
+        if isRenamedProfile(ref) {
+            tapGrants[ref.key] = now
+            return true
+        }
         guard now.timeIntervalSince(lastClickAt) < Self.tapWindow else { return false }
-        if inPage {
+        if inPage && !ref.kind.isProfile {
             guard let from, AccessPolicy.postLink(in: from) == nil else { return false }
         }
         lastClickAt = .distantPast
-        tapGrants[key] = now
+        tapGrants[ref.key] = now
         return true
     }
 
@@ -896,6 +984,7 @@ extension WebController: WKNavigationDelegate {
         if navigationAction.navigationType == .linkActivated {
             noteTap(url)
         }
+        noteSelfLoad(url, type: navigationAction.navigationType)
 
         switch policy.decide(url) {
         case .allow:
@@ -905,8 +994,16 @@ extension WebController: WKNavigationDelegate {
 
         case .verify(let ref):
             // A share link you tapped redirects here.
-            useRecentTap(ref.key, from: nil, inPage: false)
-            verify(ref, url: url, decisionHandler: decisionHandler)
+            useRecentTap(ref, from: nil, inPage: false)
+            // The page you are on. webView.url already shows the address being
+            // loaded, or the one before a redirect.
+            verify(
+                ref,
+                url: url,
+                from: lastPageURL ?? webView.url,
+                backForward: navigationAction.navigationType == .backForward,
+                decisionHandler: decisionHandler
+            )
 
         case .external(let target):
             Self.log.notice("[\(self.tab.title, privacy: .public)] EXTERNAL \(target.absoluteString, privacy: .public)")
@@ -922,6 +1019,27 @@ extension WebController: WKNavigationDelegate {
                 goHome()
             }
         }
+    }
+
+    /// A page that reloads by itself (not your pull to refresh, not a link)
+    /// goes back to the top. Write it into Diagnostics, so a jump to the top
+    /// on Marketplace can be told apart from a reload.
+    private func noteSelfLoad(_ url: URL, type: WKNavigationType) {
+        let now = Date()
+        guard now.timeIntervalSince(lastOwnLoad) > 2, now.timeIntervalSince(lastTapNoted) > 2,
+              let here = webView.url else { return }
+        switch type {
+        case .reload:
+            recordEvent(url, reason: "The page reloaded by itself")
+        case .other where Self.isMarketplace(here) && Self.isMarketplace(url):
+            recordEvent(url, reason: "Marketplace loaded a new page by itself", detail: "from \(here.absoluteString)")
+        default:
+            break
+        }
+    }
+
+    private static func isMarketplace(_ url: URL) -> Bool {
+        AccessPolicy.site(for: url) == .facebook && AccessPolicy.segments(of: url).first == "marketplace"
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -999,6 +1117,7 @@ extension WebController: WKUIDelegate {
         switch policy.decide(url) {
         case .allow, .verify:
             // A post goes through the normal check on its way in.
+            lastOwnLoad = Date()
             webView.load(URLRequest(url: url))
         case .external(let target):
             handleExternal(target)
@@ -1113,9 +1232,9 @@ extension WebController: WKScriptMessageHandler {
                 showPage()
             case .verify(let ref):
                 if why == "pushState" || why == "replaceState" || why == "poll" {
-                    useRecentTap(ref.key, from: from, inPage: true)
+                    useRecentTap(ref, from: from, inPage: true)
                 }
-                verify(ref, url: url, decisionHandler: nil)
+                verify(ref, url: url, from: from, backForward: why == "popstate", decisionHandler: nil)
             case .external:
                 // A page cannot pushState to another origin, so this is only
                 // here for completeness.
@@ -1130,6 +1249,17 @@ extension WebController: WKScriptMessageHandler {
 
         case "tap":
             noteTap((body["href"] as? String).flatMap { URL(string: $0) })
+
+        case "video-blocked":
+            // The page stopped a second video that started by itself.
+            Self.log.info("[\(self.tab.title, privacy: .public)] stopped a second video")
+            showOneVideoNotice()
+
+        case "jump":
+            // Marketplace jumped back to the top. The page put it back if it
+            // could, and says what led up to it.
+            guard let string = body["url"] as? String, let url = URL(string: string) else { return }
+            recordEvent(url, reason: "Marketplace jumped to the top", detail: String((body["detail"] as? String ?? "").prefix(400)))
 
         case "compose":
             guard let action = composeInFlight else { return }

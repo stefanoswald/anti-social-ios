@@ -77,6 +77,11 @@ struct DiagnosticsView: View {
                             Text(event.tabTitle)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            if !event.detail.isEmpty {
+                                Text(event.detail)
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                            }
                             Text(event.url.absoluteString)
                                 .font(.caption2.monospaced())
                                 .foregroundStyle(.secondary)
@@ -120,7 +125,7 @@ struct DiagnosticsView: View {
     private var blockLogText: String {
         let formatter = ISO8601DateFormatter()
         return pool.blockLog
-            .map { "\(formatter.string(from: $0.date))\t\($0.tabTitle)\t\($0.reason)\t\($0.url.absoluteString)" }
+            .map { "\(formatter.string(from: $0.date))\t\($0.tabTitle)\t\($0.reason)\t\($0.detail)\t\($0.url.absoluteString)" }
             .joined(separator: "\n")
     }
 

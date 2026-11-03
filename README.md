@@ -14,11 +14,24 @@ Five tabs:
 
 Tap the tab you are already on to jump back to its home page.
 
-## Your posts, and posts you tap
+## Your posts, and posts and profiles you tap
 
 Your own posts, Reels, videos, photos, and stories always open. That is how you read and answer comments: tap a comment alert, or open the post from My Posts, and reply right on the post.
 
-With **Open other people's posts I tap** on (the default), a post by someone else opens too, as long as you tapped it. What never happens is the next one. Swiping to the next Reel, a story moving on to the next person, or autoplay into another video is blocked, and you stay on the post you opened. Turn the switch off and only your own posts open.
+With **Open posts and profiles I tap** on (the default), a post by someone else opens too, as long as you tapped it. What never happens is the next one. Swiping to the next Reel, a story moving on to the next person, or autoplay into another video is blocked, and you stay on the post you opened. Turn the switch off and only your own posts open.
+
+Someone else's profile opens the same way: tap their name and you see who they are. Every tab of that profile (About, Photos, Reels) counts as the same tap. The page stops after about a screen and a half, with a note that says "Anti-Social stops here", so a profile never turns into a feed of their posts.
+
+### One video at a time
+
+A video opens when you tap it, and you can watch it all the way through. Then you go back to pick another one.
+
+- Tapping another video from a video page is blocked. Tapping it from a chat, your alerts, or a profile works.
+- If a player starts a second video by itself (the next video in a viewer, or the player moving on after the first one ends), the app stops it and says so.
+- Someone else's video page stops after a short scroll, like a profile, so the list of suggested videos underneath never goes on and on.
+- Back and Forward are never blocked, and your own videos always play.
+
+The page side of this is the `video` part of `hook.template.js` (in `Web/Injected.swift`). The app side is `verify` in `Web/WebController.swift`.
 
 What counts as a tap:
 
@@ -39,7 +52,7 @@ The **Groups** page lists the groups you are in. Each group opens in full: its p
 
 ## What is blocked
 
-The home feed, the Reels feed, Watch, the Stories feed, Friends, the Groups feed and suggestions, Gaming, Events, Memories, Saved, Search, Explore, hashtags, every profile except your own, and any post by someone else that you did not tap. Links to install or open the real apps are blocked too. Video never autoplays.
+The home feed, the Reels feed, Watch, the Stories feed, Friends, the Groups feed and suggestions, Gaming, Events, Memories, Saved, Search, Explore, hashtags, and any post or profile by someone else that you did not tap. Links to install or open the real apps are blocked too. Video never autoplays.
 
 Blocking happens in two places:
 
@@ -57,13 +70,19 @@ Tap the pencil in the top bar for the posting menu.
 
 The script that does this is `composeTemplate` in `Web/Injected.swift`, built from `compose.template.js`.
 
-## Marketplace ads
+## Marketplace
 
-Ads in the Marketplace results are hidden. They made the results jump back to the top while scrolling. Each listing sits in a grid cell, and an ad's cell links out through `l.facebook.com` and holds no listing, which is how the app tells them apart (see `hidingScript` in `Web/Injected.swift`).
+Ads in the Marketplace results are hidden the moment they appear, and their videos never load. Each listing sits in a grid cell, and an ad's cell links out through `l.facebook.com` and holds no listing, which is how the app tells them apart (see `hidingScript` in `Web/Injected.swift`).
+
+Marketplace sometimes jumped back to the top of the results while you scrolled. The page now guards against that:
+
+- When the page moves up to the top by itself, it is put back where you were. A move you made is never undone: your finger pulling the page down, a tap, or a new search with new listings.
+- Scrolling takes the focus off the search box, which also puts the keyboard away. Phones like to scroll back up to a box that has the focus, and Marketplace cannot make the page scroll to a box it focuses by itself.
+- Every jump is written into Diagnostics as "Marketplace jumped to the top", with where it went from and to, how tall the page was, what had the focus, and which code moved the page if any did. Reloads the app did not start are written down too.
 
 ## What is allowed
 
-Messages, Marketplace, notifications, groups, login and security pages, settings, your professional dashboard, your own profile (including your Reels and Videos tabs), your story archive, and your own posts, Reels, videos, photos, and stories. On Instagram: DMs, notifications, your own grid, and your own posts, Reels, stories, and highlights. Posting is allowed everywhere: a post, a story, Go Live, a Marketplace listing, and an Instagram post or story. Anything you tap opens as well (see above).
+Messages, Marketplace, notifications, groups, login and security pages, settings, your professional dashboard, your own profile (including your Reels and Videos tabs), your story archive, and your own posts, Reels, videos, photos, and stories. Other people's profiles open when you tap them, and stop after a short scroll. On Instagram: DMs, notifications, your own grid, and your own posts, Reels, stories, and highlights. Posting is allowed everywhere: a post, a story, Go Live, a Marketplace listing, and an Instagram post or story. Anything you tap opens as well (see above).
 
 ## Install on your iPhone
 
@@ -89,7 +108,19 @@ With the paid developer account the install stays valid for a year.
 
 ## When something slips through
 
-Open the circle menu, pick **Diagnostics**, tap **Capture page map**, then **Share page map**. Send that over together with what you saw and the rule can be tightened. The Diagnostics screen also keeps a log of everything that was blocked, in case something you needed got caught, and shows which accounts the app thinks are yours and how many of your posts it knows.
+Open the circle menu, pick **Diagnostics**, tap **Capture page map**, then **Share page map**. Send that over together with what you saw and the rule can be tightened. The page map now also says where the page is scrolled to, what has the focus, how many ads were hidden, and the last 40 things the app noticed on the page (new pages, jumps, videos stopped).
+
+The Diagnostics screen also keeps a log of everything that was blocked, in case something you needed got caught, plus Marketplace jumps and reloads the app did not start. **Share log** sends that list. It also shows which accounts the app thinks are yours and how many of your posts it knows.
+
+## Checks
+
+`Checks/main.swift` checks the rules in `Policy/AccessPolicy.swift` against more than a hundred links. The update script builds and runs it on the Mac before every build:
+
+```
+xcrun swiftc AntiSocial/Policy/AccessPolicy.swift Checks/main.swift -o /tmp/policy-check && /tmp/policy-check
+```
+
+The Android app's rules pass the same checks. The page scripts are tested separately, in the cloud, against the copies built into `Web/Injected.swift`.
 
 ## Files
 
@@ -107,4 +138,6 @@ AntiSocial/
   Web/Injected.swift         The in-page URL hook, hiding CSS, diagnostics script.
   Web/GuardedWebView.swift   SwiftUI wrapper.
   Views/                     Settings, Diagnostics, blocked banner.
+Checks/
+  main.swift                 Checks the rules. Not part of the app.
 ```

@@ -59,6 +59,14 @@ enum PostKind: Hashable {
     case instagramReelsPlayer
     case instagramStory
     case instagramHighlight
+    /// Someone else's profile. It opens when you tap it, like a post, and
+    /// only scrolls a short way (see Injected).
+    case facebookProfile
+    case instagramProfile
+
+    var isProfile: Bool {
+        self == .facebookProfile || self == .instagramProfile
+    }
 
     /// Reels and videos, the things a player swipes through.
     var isVideo: Bool {
@@ -423,8 +431,15 @@ struct AccessPolicy {
         }
 
         // Accounts without a vanity name live at /profile.php?id=<number>.
-        if first == "profile.php", let id = Self.queryValue(url, named: "id"), isOwn(id, on: .facebook) {
-            return .allow
+        if first == "profile.php" {
+            let id = Self.queryValue(url, named: "id")
+            if let id, isOwn(id, on: .facebook) {
+                return .allow
+            }
+            if let id, Self.isDigits(id) {
+                return profileDecision(site: .facebook, name: id)
+            }
+            return .block(reason: "Profile")
         }
 
         // Groups: any one group is fine, with everything in it. The mixed
@@ -480,7 +495,39 @@ struct AccessPolicy {
             return .allow
         }
 
+        // Someone else's opens when you tap a link to it, so you can see who
+        // they are. The page only scrolls a short way (see Injected).
+        if !Self.isFacebookRoute(first), Self.isFacebookName(first) {
+            return profileDecision(site: .facebook, name: first)
+        }
+
         return .block(reason: "Profile")
+    }
+
+    /// Someone else's profile: opens like a post you tap, and never by itself.
+    /// Every tab of one profile (about, photos) shares one key.
+    private func profileDecision(site: SiteKind, name: String) -> PolicyDecision {
+        let owner = name.lowercased()
+        let isInstagram = site == .instagram
+        let home = isInstagram ? "https://www.instagram.com/\(owner)/" : "https://www.facebook.com/\(owner)/"
+        let ref = PostRef(
+            site: site,
+            key: (isInstagram ? "ig" : "fb") + ":profile:" + owner,
+            lookupURL: URL(string: home) ?? URL(string: "https://www.facebook.com/")!,
+            kind: isInstagram ? .instagramProfile : .facebookProfile,
+            otherOwner: owner
+        )
+        return .verify(ref)
+    }
+
+    /// Facebook vanity names: lowercase letters, digits, "." and "-".
+    private static func isFacebookName(_ text: String) -> Bool {
+        guard !text.isEmpty, text.count <= 100 else { return false }
+        return text.unicodeScalars.allSatisfy { scalar in
+            let letter = scalar.value >= 97 && scalar.value <= 122
+            let digit = scalar.value >= 48 && scalar.value <= 57
+            return letter || digit || scalar == "." || scalar == "-"
+        }
     }
 
     private func decideGroups(_ url: URL, segments: [String]) -> PolicyDecision {
@@ -662,10 +709,12 @@ struct AccessPolicy {
         // composer. Only the deeper step paths are the create flow. When the
         // page pushes the URL itself the user cannot have typed it, so any
         // step name is fine; on a cold load only the known steps are.
-        if options.allowPosting, first == "create", segments.count >= 2 {
-            if inPage || Self.instagramCreateSteps.contains(segments[1]) {
+        if first == "create", segments.count >= 2 {
+            if options.allowPosting, inPage || Self.instagramCreateSteps.contains(segments[1]) {
                 return .allow
             }
+            // Never the profile of the person called "create".
+            return .block(reason: options.allowPosting ? "Create page" : "Posting is off")
         }
 
         // One post, Reel, or story. This is where you answer comments.
@@ -693,6 +742,11 @@ struct AccessPolicy {
                 return .block(reason: "Tagged posts")
             }
             return .allow
+        }
+
+        // Someone else's profile opens when you tap a link to it.
+        if Self.isInstagramUsername(first) {
+            return profileDecision(site: .instagram, name: first)
         }
 
         return .block(reason: "Profile")

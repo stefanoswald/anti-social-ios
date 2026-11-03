@@ -34,15 +34,15 @@ struct SettingsView: View {
                 } header: {
                     Text("Your accounts")
                 } footer: {
-                    Text("The app fills these in by itself once you have used each tab. They tell the app which profile and which posts are yours. Every other profile stays blocked.")
+                    Text("The app fills these in by itself once you have used each tab. They tell the app which profile and which posts are yours.")
                 }
 
                 Section {
-                    Toggle("Open other people's posts I tap", isOn: $settings.openTappedPosts)
+                    Toggle("Open posts and profiles I tap", isOn: $settings.openTappedPosts)
                 } header: {
                     Text("Posts")
                 } footer: {
-                    Text("Your own posts, Reels, videos, and stories always open. With this on, a post you tap opens too, so you can read it and reply. It never moves on to the next one. Swiping or autoplay into another post is blocked. Turn this off to open only your own posts.")
+                    Text("Your own posts, Reels, videos, and stories always open. With this on, a post or profile you tap opens too, so you can read it, reply, and see who someone is. Videos play one at a time. Other people's profiles and videos stop after a short scroll. Swiping or autoplay into the next post is blocked. Turn this off to open only your own posts.")
                 }
 
                 Section {
@@ -64,7 +64,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Blocking")
                 } footer: {
-                    Text("The home feed, the Reels and Watch feeds, the Stories feed, Explore, the Groups feed, and other people's profiles are always blocked. Your groups stay open.")
+                    Text("The home feed, the Reels and Watch feeds, the Stories feed, Explore, and the Groups feed are always blocked. Your groups stay open.")
                 }
 
                 Section {

@@ -122,7 +122,7 @@ final class WebViewPool: ObservableObject {
     private func applySettings() {
         let options = settings.policyOptions
         let config = pageConfig()
-        // Switching "Open other people's posts I tap" off should also apply
+        // Switching "Open posts and profiles I tap" off should also apply
         // to the page you are looking at right now.
         let turnedOffTapped = !settings.openTappedPosts && lastOpenTappedPosts
         lastOpenTappedPosts = settings.openTappedPosts
