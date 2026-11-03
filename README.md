@@ -48,17 +48,34 @@ Blocking happens in two places:
 
 On top of that, feed links, Reels tabs, and "open the app" nags are hidden inside the pages. That part is cosmetic. The URL rules are the wall.
 
+## Posting
+
+Tap the pencil in the top bar for the posting menu.
+
+- **Facebook:** New post, New reel, New story, Go live, Sell something. New post and New reel open your profile, scroll down to its post box or Reel button, and open it for you. Pick your photo or video in the window that opens.
+- **Instagram:** New post or reel, and New story. Both open your profile and make Instagram's own + button glow. Tap it, then pick a photo or video (a video becomes a reel), or choose Story. Instagram only opens the photo picker from a real tap, so the app points at the button instead of pressing it.
+
+The script that does this is `composeTemplate` in `Web/Injected.swift`, built from `compose.template.js`.
+
+## Marketplace ads
+
+Ads in the Marketplace results are hidden. They made the results jump back to the top while scrolling. Each listing sits in a grid cell, and an ad's cell links out through `l.facebook.com` and holds no listing, which is how the app tells them apart (see `hidingScript` in `Web/Injected.swift`).
+
 ## What is allowed
 
 Messages, Marketplace, notifications, groups, login and security pages, settings, your professional dashboard, your own profile (including your Reels and Videos tabs), your story archive, and your own posts, Reels, videos, photos, and stories. On Instagram: DMs, notifications, your own grid, and your own posts, Reels, stories, and highlights. Posting is allowed everywhere: a post, a story, Go Live, a Marketplace listing, and an Instagram post or story. Anything you tap opens as well (see above).
 
 ## Install on your iPhone
 
-Needs Xcode 16 or newer on the Mac mini.
+The quick way: plug in every iPhone you want it on, unlock them, and double-click `update-anti-social.command` in Documents. It builds the app, adds a new iPhone to your developer account, and installs it on each phone. A new phone needs two things first: tap **Trust** when it asks about this Mac, and turn on **Developer Mode** (Settings > Privacy & Security > Developer Mode, then restart and tap Turn On).
+
+The manual way, in Xcode:
+
+Needs Xcode 16 or newer on the Mac mini (Xcode 27 for an iPhone on iOS 27).
 
 1. Open `AntiSocial.xcodeproj` in Xcode.
 2. Click the `AntiSocial` project in the sidebar, pick the `AntiSocial` target, open **Signing & Capabilities**, and choose your Team. If Xcode complains about the bundle identifier, change `com.stefanoswald.antisocial` to anything unique.
-3. Plug in the iPhone 15 Pro Max. Pick it as the run destination at the top of the window.
+3. Plug in the iPhone. Pick it as the run destination at the top of the window.
 4. Press Run (Cmd+R). The first time, the phone will ask you to trust the developer under **Settings > General > VPN & Device Management**.
 
 With the paid developer account the install stays valid for a year.

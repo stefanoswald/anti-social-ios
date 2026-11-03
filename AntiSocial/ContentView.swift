@@ -111,6 +111,8 @@ struct TabPage: View {
                 }
 
                 BlockToast(event: controller.lastBlock, enabled: settings.showBlockToasts)
+
+                NoticeToast(notice: controller.notice)
             }
         }
     }
@@ -138,19 +140,18 @@ struct TabPage: View {
             .lineLimit(1)
 
             if settings.allowPosting {
+                // A tap opens the menu. Each item opens the site's own composer.
                 Menu {
                     ForEach(composeActions) { action in
                         Button {
                             controller.compose(action, ownInstagramUsername: pool.instagramUsername)
                         } label: {
-                            Label(action.label, systemImage: action.systemImage)
+                            Label(action.label(on: pageSite), systemImage: action.systemImage)
                         }
                     }
                 } label: {
                     Image(systemName: "square.and.pencil")
                         .frame(width: 32, height: 32)
-                } primaryAction: {
-                    controller.compose(.post, ownInstagramUsername: pool.instagramUsername)
                 }
                 .accessibilityLabel("Compose")
             }
@@ -203,13 +204,14 @@ struct TabPage: View {
         .background(.bar)
     }
 
-    /// Instagram has no web page for creating a Story or going live, and
-    /// Marketplace is a Facebook thing, so the Instagram pages only offer a post.
+    private var pageSite: SiteKind {
+        AccessPolicy.site(for: page.home)
+    }
+
+    /// Facebook: post, reel, story, live, and a Marketplace listing.
+    /// Instagram: a post or reel, and a story, both from its own + button.
     private var composeActions: [ComposeAction] {
-        switch AccessPolicy.site(for: page.home) {
-        case .instagram: return [.post]
-        default: return ComposeAction.allCases
-        }
+        ComposeAction.available(on: pageSite)
     }
 
     private var hostLabel: String {

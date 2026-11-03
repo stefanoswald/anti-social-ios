@@ -38,3 +38,44 @@ struct BlockToast: View {
         }
     }
 }
+
+/// A short note from the app, like where to tap to post. It stays up longer
+/// than the block banner, because it asks you to do something.
+struct NoticeToast: View {
+    let notice: Notice?
+
+    @State private var visibleNotice: Notice?
+
+    var body: some View {
+        VStack {
+            if let visibleNotice {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "hand.tap.fill")
+                    Text(visibleNotice.text)
+                        .font(.subheadline.weight(.medium))
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(.quaternary))
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .animation(.spring(duration: 0.35), value: visibleNotice?.id)
+        .allowsHitTesting(false)
+        .task(id: notice?.id) {
+            guard let notice else { return }
+            visibleNotice = notice
+            try? await Task.sleep(for: .seconds(7))
+            if visibleNotice?.id == notice.id {
+                visibleNotice = nil
+            }
+        }
+    }
+}

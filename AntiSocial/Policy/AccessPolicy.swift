@@ -443,6 +443,7 @@ struct AccessPolicy {
             case ("stories", "create"),
                  ("live", "producer"),
                  ("reel", "create"),
+                 ("reels", "create"),
                  ("media", "upload"),
                  ("video", "upload"):
                 return .allow

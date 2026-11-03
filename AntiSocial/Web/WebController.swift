@@ -6,15 +6,19 @@ import os
 /// The things you can start from the compose button.
 enum ComposeAction: String, CaseIterable, Identifiable {
     case post
+    case reel
     case story
     case live
     case listing
 
     var id: String { rawValue }
 
-    var label: String {
+    /// What the menu says. Instagram turns a video post into a reel, so its
+    /// post item says so.
+    func label(on site: SiteKind) -> String {
         switch self {
-        case .post: return "New post"
+        case .post: return site == .instagram ? "New post or reel" : "New post"
+        case .reel: return "New reel"
         case .story: return "New story"
         case .live: return "Go live"
         case .listing: return "Sell something"
@@ -24,11 +28,26 @@ enum ComposeAction: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .post: return "square.and.pencil"
+        case .reel: return "film"
         case .story: return "circle.dashed"
         case .live: return "dot.radiowaves.left.and.right"
         case .listing: return "tag"
         }
     }
+
+    /// What each site's compose menu offers.
+    static func available(on site: SiteKind) -> [ComposeAction] {
+        switch site {
+        case .instagram: return [.post, .story]
+        default: return [.post, .reel, .story, .live, .listing]
+        }
+    }
+}
+
+/// A short note for you, like where to tap to post. Shown in a banner.
+struct Notice: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
 }
 
 /// A record of something the app refused to load.
@@ -62,6 +81,8 @@ final class WebController: NSObject, ObservableObject {
     @Published var lastBlock: BlockEvent?
     /// True while the app checks whether the post being opened is yours.
     @Published private(set) var isCheckingOwner = false
+    /// A note to show in a banner, like where to tap to post.
+    @Published private(set) var notice: Notice?
 
     var policy: AccessPolicy
     var externalLinks: AppSettings.ExternalLinkBehavior
@@ -122,6 +143,16 @@ final class WebController: NSObject, ObservableObject {
     private var lastClickAt: Date = .distantPast
     /// How long a tap counts for the post it opens.
     private static let tapWindow: TimeInterval = 10
+    /// A composer to open once its page has loaded.
+    private struct PendingCompose {
+        let action: ComposeAction
+        let site: SiteKind
+        let steps: [[String: Any]]
+        let started: Date
+    }
+    private var pendingCompose: PendingCompose?
+    /// The compose action whose script is running on the page.
+    private var composeInFlight: ComposeAction?
     private let refreshControl = UIRefreshControl()
 
     /// Private-but-widely-used policy value that tells WebKit not to hand the
@@ -225,36 +256,101 @@ final class WebController: NSObject, ObservableObject {
         load(url)
     }
 
-    /// Opens the right page for a compose action on this tab's site. Facebook
-    /// and Instagram both put the composer in a dialog on your own profile, so
-    /// most of these just land you there and let the page do the rest.
+    /// Opens the composer for a compose action on this tab's site. Facebook's
+    /// post box and Reel button sit far down your profile, so the app scrolls
+    /// to them and opens them. Instagram's + button opens your photo picker,
+    /// which only works from a real tap, so the app makes it glow instead.
     func compose(_ action: ComposeAction, ownInstagramUsername: String) {
-        let site = AccessPolicy.site(for: tab.home)
-
-        switch (site, action) {
-        case (.instagram, _):
+        switch AccessPolicy.site(for: tab.home) {
+        case .instagram:
             let name = ownInstagramUsername.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else {
-                loadError = "Open your Instagram inbox once so the app can learn your username, or type it into Settings."
+            guard !name.isEmpty, let profile = URL(string: "https://www.instagram.com/\(name)/") else {
+                showNotice("Open IG Inbox once so the app can learn your Instagram username, or type it into Settings.")
                 return
             }
-            load(URL(string: "https://www.instagram.com/\(name)/")!)
+            startCompose(action, url: profile, site: .instagram, steps: [
+                ["svg": "New post", "glow": true, "name": "plus"]
+            ])
 
-        case (_, .post):
-            // Facebook resolves /me to your own profile, where the composer is.
-            load(URL(string: "https://www.facebook.com/me")!)
-        case (_, .story):
-            load(URL(string: "https://www.facebook.com/stories/create")!)
-        case (_, .live):
-            load(URL(string: "https://www.facebook.com/live/producer")!)
-        case (_, .listing):
-            load(URL(string: "https://www.facebook.com/marketplace/create")!)
+        case .facebook, .other:
+            switch action {
+            case .post:
+                // Facebook resolves /me to your own profile.
+                startCompose(action, url: URL(string: "https://www.facebook.com/me")!, site: .facebook, steps: [
+                    ["startsWith": "What's on your mind", "name": "post-box"]
+                ])
+            case .reel:
+                startCompose(action, url: URL(string: "https://www.facebook.com/me")!, site: .facebook, steps: [
+                    ["label": "Reel", "name": "reel-button"]
+                ])
+            case .story:
+                load(URL(string: "https://www.facebook.com/stories/create")!)
+            case .live:
+                load(URL(string: "https://www.facebook.com/live/producer")!)
+            case .listing:
+                load(URL(string: "https://www.facebook.com/marketplace/create")!)
+            }
+        }
+    }
+
+    private func startCompose(_ action: ComposeAction, url: URL, site: SiteKind, steps: [[String: Any]]) {
+        load(url)
+        pendingCompose = PendingCompose(action: action, site: site, steps: steps, started: Date())
+    }
+
+    /// Runs the composer script once the page it needs has loaded.
+    private func runPendingCompose() {
+        guard let pending = pendingCompose else { return }
+        guard Date().timeIntervalSince(pending.started) < 30 else {
+            pendingCompose = nil
+            return
+        }
+        guard let url = webView.url, AccessPolicy.site(for: url) == pending.site else { return }
+        pendingCompose = nil
+        composeInFlight = pending.action
+        webView.evaluateJavaScript(Injected.composeScript(steps: pending.steps), completionHandler: nil)
+    }
+
+    /// What to tell you once the composer script has done its part.
+    private func composeNotice(for action: ComposeAction, opened: Bool) -> String? {
+        if AccessPolicy.site(for: tab.home) == .instagram {
+            switch (action, opened) {
+            case (.story, true):
+                return "Tap the glowing + button, then choose Story."
+            case (.story, false):
+                return "Tap the + button at the bottom of Instagram, then choose Story."
+            case (_, true):
+                return "Tap the glowing + button, then pick a photo or video. A video becomes a reel."
+            case (_, false):
+                return "Tap the + button at the bottom of Instagram, then pick a photo or video."
+            }
+        }
+        guard !opened else { return nil }
+        if action == .reel {
+            return "Facebook did not open its Reel window. Scroll down your profile to the Reel button."
+        }
+        return "Facebook did not open its post window. Scroll down your profile to What's on your mind?"
+    }
+
+    private func showNotice(_ text: String) {
+        let next = Notice(text: text)
+        notice = next
+        // Clear it again, so the banner does not come back when you return
+        // to this tab later.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            if self?.notice?.id == next.id {
+                self?.notice = nil
+            }
         }
     }
 
     private func load(_ url: URL) {
         clearError()
         endOwnerCheck()
+        // Any other page load cancels a composer that was waiting to open.
+        pendingCompose = nil
+        composeInFlight = nil
         awaitingOwnProfile = (url.path.lowercased() == "/me")
         webView.load(URLRequest(url: url))
     }
@@ -778,6 +874,12 @@ extension WebController: WKNavigationDelegate {
             return
         }
 
+        // Leaving the page before its composer opened cancels the composer.
+        // The app's own loads and redirects come through as .other.
+        if navigationAction.navigationType == .backForward || navigationAction.navigationType == .linkActivated {
+            pendingCompose = nil
+        }
+
         // facebook.com/me lands on your own profile. That redirect is the one
         // reliable way to find out who you are, so let it through and remember.
         if awaitingOwnProfile, AccessPolicy.site(for: url) == .facebook,
@@ -844,6 +946,7 @@ extension WebController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         refreshControl.endRefreshing()
+        runPendingCompose()
         onPageFinished?()
     }
 
@@ -867,7 +970,13 @@ extension WebController: WKNavigationDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        // WebKit killed the page (memory pressure). Bring it back.
+        // WebKit stopped the page, almost always because it used too much
+        // memory. Note it in Diagnostics, then bring the page back.
+        if let url = webView.url ?? currentURL {
+            let event = BlockEvent(date: Date(), tabTitle: tab.title, url: url, reason: "Page reloaded after running out of memory")
+            onBlock?(event)
+            Self.log.notice("[\(self.tab.title, privacy: .public)] web content process ended, reloading")
+        }
         reload()
     }
 }
@@ -1021,6 +1130,15 @@ extension WebController: WKScriptMessageHandler {
 
         case "tap":
             noteTap((body["href"] as? String).flatMap { URL(string: $0) })
+
+        case "compose":
+            guard let action = composeInFlight else { return }
+            composeInFlight = nil
+            let opened = body["ok"] as? Bool ?? false
+            Self.log.info("[\(self.tab.title, privacy: .public)] compose \(action.rawValue, privacy: .public) opened: \(opened)")
+            if let text = composeNotice(for: action, opened: opened) {
+                showNotice(text)
+            }
 
         case "links":
             guard let hrefs = body["hrefs"] as? [String],
